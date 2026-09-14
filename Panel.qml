@@ -96,9 +96,15 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property color iconColor: vpn.connected ? foreground : dim
+  // Colour carries the state, never width: with a transparent bar the icon sits
+  // on the wallpaper, so "off" has to read as a shift in the icon's own colour.
+  // The bar foreground darkened 1.5x is the idiom the first-party widgets and
+  // the hass widget use. Do not mix toward Color.bar.background here - that
+  // assumes an opaque bar slab, which a transparent bar does not have, so the
+  // mark came out as a near-invisible grey instead.
   readonly property color barIconColor: vpn.connected
                                         ? barForeground
-                                        : Model.mixInk(barForeground, Color.bar.background, 0.55)
+                                        : Qt.darker(barForeground, 1.5)
 
   readonly property var quickActions: [
     { key: "fastest", label: "Fastest", hint: "Best server for your location", plus: false },
@@ -554,8 +560,9 @@ Panel {
           // corner, so it reads larger than the neighbouring glyphs at equal
           // size, trimmed to sit level with them.
           iconSize: Style.space(11)
+          // No opacity is stacked on top of the colour: darkening and fading
+          // together double-dimmed the mark into the wallpaper.
           color: root.barIconColor
-          opacity: vpn.connected ? 1.0 : 0.6
         }
       }
     }
