@@ -19,6 +19,11 @@ keys and values to `protonvpn config set`.
 
 After sign-in the plugin rewrites `~/.local/share/keyrings/Default_keyring.keyring`
 in place (fold Proton's literal newlines into GKeyFile `\\n`) and pins the
-`default` alias file to that store. It does not restart gnome-keyring or
-touch Hypr/Omarchy/systemd config.
+`default` alias file to that store. The same fold runs again if Proton later
+writes raw newlines back; it no-ops when the INI is already clean. It does
+not restart gnome-keyring or touch Hypr/Omarchy/systemd config.
+
+Background `protonvpn status` is not polled while the panel is closed. That
+CLI talks to Secret Service, and gnome-keyring 50 aborts on a racy
+`Get(Label)`. The bar icon follows the tunnel via `nmcli` instead.
 

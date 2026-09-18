@@ -98,7 +98,7 @@ Panel {
   readonly property color iconColor: vpn.connected ? foreground : dim
   readonly property color barIconColor: vpn.connected
                                         ? barForeground
-                                        : Model.mixInk(barForeground, Color.bar.background, 0.55)
+                                        : Model.dimInk(barForeground)
 
   readonly property var quickActions: [
     { key: "fastest", label: "Fastest", hint: "Best server for your location", plus: false },
@@ -122,15 +122,11 @@ Panel {
     if (vpn.connected) {
       var server = Model.routeLabel(vpn.displayServer)
       if (server === "") return "Protected"
-      // The feature you asked for, then the server: two hops deserve saying
-      // so, and a P2P click should visibly have landed.
       if (Model.isSecureCore(vpn.displayServer)) return "\udb82\udd9d Secure Core · " + server
       if (vpn.p2pRequested && vpn.currentP2p) return "\udb81\udc97 P2P · " + server
       return server
     }
-    if (!vpn.accountProbed) return "Checking…"
-    if (!vpn.signedIn) return "Signed out"
-    return "Not protected"
+    return vpn.displayStatus
   }
 
   readonly property string toggleHint: vpn.connected ? "Disconnect" : "Connect to fastest server"
@@ -531,7 +527,6 @@ Panel {
         autoConnect: vpn.autoConnect,
         autoReady: vpn.autoReady,
         linkActive: vpn.linkActive,
-        statusConnected: vpn.statusConnected,
         desired: vpn._desired,
         autoWaitMs: Math.max(0, vpn._autoNextMs - Date.now()),
         pinFailed: vpn._autoPinFailed,
@@ -554,8 +549,8 @@ Panel {
           // corner, so it reads larger than the neighbouring glyphs at equal
           // size, trimmed to sit level with them.
           iconSize: Style.space(11)
+          // No extra opacity: colour already carries the off-state.
           color: root.barIconColor
-          opacity: vpn.connected ? 1.0 : 0.6
         }
       }
     }

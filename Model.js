@@ -310,12 +310,32 @@ function mixInk(fg, bg, t) {
 }
 
 /**
+ * Rec.601 luma. Shared by dimInk / washInk so light vs dark ink is one test.
+ */
+function luma(c) {
+  return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b
+}
+
+/**
+ * Dim a glyph using the ink itself, not a bar slab.
+ *
+ * Transparent bars have no opaque `Color.bar.background` to mix toward, so
+ * mixInk(fg, bar.background) washes out against wallpaper. Qt.darker always
+ * goes toward black and kills light-theme ink. Mix toward black when the
+ * foreground is light, toward white when it is dark. Strength matches
+ * Qt.darker(fg, 1.5) on dark themes (1 - 1/1.5).
+ */
+function dimInk(fg) {
+  var paper = luma(fg) > 0.5 ? Qt.rgba(0, 0, 0, 1) : Qt.rgba(1, 1, 1, 1)
+  return mixInk(fg, paper, 0.35)
+}
+
+/**
  * Foreground-as-fill with alpha. Light backgrounds get a stronger wash so
  * the map and traffic graph stay visible.
  */
 function washInk(fg, bg, alpha) {
-  var lum = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b
-  var a = lum > 0.5 ? Math.min(0.55, Number(alpha) * 2.6) : Number(alpha)
+  var a = luma(bg) > 0.5 ? Math.min(0.55, Number(alpha) * 2.6) : Number(alpha)
   return Qt.rgba(fg.r, fg.g, fg.b, a)
 }
 

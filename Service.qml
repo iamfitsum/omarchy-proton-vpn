@@ -37,6 +37,8 @@ Item {
   // first probe lands. Without this the widget briefly claims "Signed out"
   // over a tunnel that is plainly up.
   property bool accountProbed: false
+  // info hung on Secret Service; CHECKING would otherwise last forever.
+  property bool accountTimedOut: false
   property string account: ""
   property string plan: ""
 
@@ -44,8 +46,7 @@ Item {
   property bool linkActive: false
   property string linkServer: ""
 
-  // `protonvpn status`-derived, slow
-  property bool statusConnected: false
+  // `protonvpn status`-derived, slow. Up/down for the bar is linkActive.
   property bool statusConnecting: false
   property string statusText: "Checking…"
   property string serverName: ""
@@ -201,7 +202,7 @@ Item {
   property string _configKey: ""
   property string _configValue: ""
 
-  readonly property bool connected: _desired === -1 ? (linkActive || statusConnected) : (_desired === 1)
+  readonly property bool connected: _desired === -1 ? linkActive : (_desired === 1)
   readonly property bool busy: actionProcess.running || connectProcess.running
 
   // Every `protonvpn` call is a fresh Python process that loads, and may
@@ -247,7 +248,6 @@ Item {
     return configPendingValue === "off" ? "Turning off…" : "Turning on…"
   }
 
-  readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 3600)
   readonly property int watchIntervalSec: intSetting("watchIntervalSec", 4, 2, 60)
   readonly property bool notificationsOn: String(setting("notifications", "on")) !== "off"
 
@@ -261,7 +261,7 @@ Item {
     if (pendingLabel !== "") return pendingLabel
     if (connected) return "Protected"
     if (statusConnecting) return "Connecting…"
-    if (!accountProbed) return "Checking…"
+    if (!accountProbed) return accountTimedOut ? "CLI timed out" : "Checking…"
     if (!signedIn) return "Signed out"
     return "Not protected"
   }
@@ -277,6 +277,14 @@ Item {
     if (n < min) n = min
     if (n > max) n = max
     return n
+  }
+
+  /**
+   * Wrap a read-only CLI probe so a Secret Service hang cannot pin the panel.
+   * Connect/disconnect are not wrapped; those legitimately take 30-60s.
+   */
+  function probeCommand(args) {
+    return ["timeout", "--kill-after=2", "10"].concat(args)
   }
 
   function refresh() {
@@ -324,7 +332,7 @@ Item {
     if (!installed) return
     if (cliBusy) { _wantStatus = true; return }
     _probeRunning = true
-    statusProcess.command = ["protonvpn", "status"]
+    statusProcess.command = root.probeCommand(["protonvpn", "status"])
     statusProcess.running = true
   }
 
@@ -332,7 +340,7 @@ Item {
     if (!installed) return
     if (cliBusy) { _wantAccount = true; return }
     _probeRunning = true
-    accountProcess.command = ["protonvpn", "info"]
+    accountProcess.command = root.probeCommand(["protonvpn", "info"])
     accountProcess.running = true
   }
 
@@ -341,7 +349,7 @@ Item {
     if (countriesLoaded && force !== true) return
     if (cliBusy) { _wantCountries = true; return }
     _probeRunning = true
-    countriesProcess.command = ["protonvpn", "countries", "list"]
+    countriesProcess.command = root.probeCommand(["protonvpn", "countries", "list"])
     countriesProcess.running = true
   }
 
@@ -350,7 +358,7 @@ Item {
     if (!installed || !signedIn) { configPending = ""; configPendingValue = ""; return }
     if (cliBusy) { _wantConfig = true; return }
     _probeRunning = true
-    configProcess.command = ["protonvpn", "config", "list"]
+    configProcess.command = root.probeCommand(["protonvpn", "config", "list"])
     configProcess.running = true
   }
 
@@ -683,7 +691,7 @@ Item {
     p2pRequested = args.indexOf("--p2p") !== -1
     _autoAttempt = auto === true
     _autoHold = false
-    if (linkActive || statusConnected) root.markChanging()
+    if (linkActive) root.markChanging()
     else root.clearChanging()
     _desired = 1
     _target = target
@@ -711,7 +719,7 @@ Item {
     p2pRequested = false
     _autoAttempt = false
     _autoHold = false
-    if (linkActive || statusConnected) root.markChanging()
+    if (linkActive) root.markChanging()
     else root.clearChanging()
     _desired = 1
     _target = null
@@ -845,6 +853,7 @@ Item {
   // INI keyring. gnome-keyring then rejects the file on the next boot. Fold
   // those newlines and pin the default alias; do not restart the daemon.
   function persistSession(force) {
+    if (!force && !signedIn && !accountTimedOut) return
     var now = Date.now()
     if (!force && now - _lastPersistMs < 60000) return
     _lastPersistMs = now
@@ -940,7 +949,6 @@ Item {
     // Applying it is what flashes Protected / Not protected mid-hop.
     if (_desired === 1 && !parsed.connected) return
     if (_desired === 0 && parsed.connected) return
-    statusConnected = parsed.connected
     statusConnecting = parsed.connecting
     statusText = parsed.statusText
     serverName = parsed.serverName
@@ -971,7 +979,7 @@ Item {
   function reconcile() {
     if (_desired === -1) return
     if (_changingServer) return
-    var real = linkActive || statusConnected
+    var real = linkActive
     if (real === (_desired === 1)) {
       _desired = -1
       pendingLabel = ""
@@ -1186,16 +1194,27 @@ Item {
   }
 
   Timer {
-    id: statusTimer
-    // Cheap enough to keep current while the panel is open; throttled back to
-    // the configured interval once it closes.
-    interval: (root.panelOpen ? 5 : root.refreshIntervalSec) * 1000
+    id: persistTimer
+    // Fold Proton's INI on its own cadence, not the nmcli tick.
+    interval: 60000
     repeat: true
+    running: root.installed && (root.signedIn || root.accountTimedOut)
+    onTriggered: root.persistSession(false)
+  }
+
+  Timer {
+    id: statusTimer
+    interval: 5 * 1000
+    repeat: true
+    // Background `protonvpn status` talks to gnome-keyring over D-Bus.
+    // gnome-keyring 50 aborts on a racy Secret Service Get(Label) (#2).
+    // The bar icon already comes from nmcli. Status still runs when the
+    // panel opens, after actions, and when the tunnel goes up or down.
     // Not while a connect or disconnect is running: `protonvpn connect`
     // blocks for 30-60s, and a 5s poll across that is where most of the
     // concurrent CLI processes used to come from. delayedRefresh pulls fresh
     // state 1.2s after the action finishes, so nothing is lost by waiting.
-    running: root.installed && root.signedIn && !root.busy
+    running: root.installed && root.signedIn && !root.busy && root.panelOpen
     onTriggered: root.refreshStatus()
   }
 
@@ -1351,7 +1370,7 @@ Item {
       if (was !== link.active) root.refreshStatus()
       // A tunnel we didn't think we were signed in for means the account
       // state is wrong, not the link. Re-probe rather than trusting it.
-      if (link.active && !root.signedIn) root.refreshAccount()
+      if (link.active && !root.signedIn && !root.accountTimedOut) root.refreshAccount()
     }
   }
 
@@ -1368,6 +1387,7 @@ Item {
         root.applyStatus(String(statusStdout.text || ""))
         root.lastError = ""
       } else {
+        root.statusConnecting = false
         root.lastError = Model.elide(String(statusStderr.text || "") || "protonvpn status failed")
       }
     }
@@ -1383,13 +1403,28 @@ Item {
       Qt.callLater(root.drainProbes)
       // A one-off failure must not latch "signed out" forever, retry instead
       // of leaving a signed-in user staring at a sign-in prompt.
-      if (exitCode !== 0) { accountRetry.restart(); return }
+      if (exitCode === 124) {
+        // Leave the latch set so watchLink cannot stampede Secret Service.
+        root.accountTimedOut = true
+        root._wantAccount = false
+        root.lastError = "Proton CLI timed out waiting on the keyring"
+        accountRetry.interval = 30000
+        accountRetry.restart()
+        return
+      }
+      if (exitCode !== 0) {
+        accountRetry.interval = 5000
+        accountRetry.restart()
+        return
+      }
       var info = Model.parseAccount(String(accountStdout.text || ""))
       var was = root.signedIn
+      root.accountTimedOut = false
       root.accountProbed = true
       root.signedIn = info.signedIn
       root.account = info.account
       root.plan = info.plan
+      root.lastError = ""
       if (info.signedIn) {
         root.persistSession(!was)
         if (!was) {

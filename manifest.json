@@ -19,20 +19,10 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshIntervalSec": 30,
       "watchIntervalSec": 4,
       "notifications": "on"
     },
     "schema": [
-      {
-        "key": "refreshIntervalSec",
-        "type": "integer",
-        "label": "Status refresh interval (seconds)",
-        "min": 5,
-        "max": 3600,
-        "step": 5,
-        "defaultValue": 30
-      },
       {
         "key": "watchIntervalSec",
         "type": "integer",

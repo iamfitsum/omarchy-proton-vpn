@@ -38,7 +38,11 @@ omarchy plugin update io.github.iamfitsum.omarchy-proton-vpn
 omarchy plugin remove io.github.iamfitsum.omarchy-proton-vpn
 ```
 
-That does not uninstall the CLI or sign you out:
+That does not uninstall the CLI or sign you out, and it does not fold the
+keyring. Proton may write raw newlines back into
+`~/.local/share/keyrings/Default_keyring.keyring`; if gnome-keyring then
+says the file is unrecognized, sign in once from the panel (or run
+`python3 sanitize_keyring.py --persist` from a checkout) before reboot.
 
 ```bash
 protonvpn disconnect
@@ -68,13 +72,17 @@ together. The panel warns if the app is present.
 
 ## Settings
 
-Omarchy widget settings: status refresh, nmcli link watch, desktop
-notifications.
+Omarchy widget settings: nmcli link watch, desktop notifications. The bar
+icon follows NetworkManager; `protonvpn status` runs while the panel is
+open, after an action, and when the tunnel goes up or down — not on a
+background timer. gnome-keyring 50 aborts if that CLI is polled forever.
 
 ## Session
 
 Sign in once from the panel. The plugin folds Proton's gnome-keyring INI
-so the session survives reboot until you sign out.
+so the session survives reboot until you sign out. Proton's daemon
+sometimes writes raw newlines back; the plugin folds again about once a
+minute while signed in, or while the account probe is timed out.
 
 ## Layout
 
