@@ -25,6 +25,7 @@ KNOWN_KEYS = (
     "lock-on-idle",
     "lock-after",
     "secret",
+    "binary-secret",
     "key",
     "value",
     "name",
