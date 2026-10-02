@@ -69,6 +69,23 @@ class SanitizeKeyringTests(unittest.TestCase):
         out = sanitize_keyring_text(text)
         self.assertEqual(out, text)
 
+    def test_keeps_a_binary_secret_on_its_own_line(self) -> None:
+        # gnome-keyring writes a secret that is not valid UTF-8 as
+        # `binary-secret=<hex>` (ZapFast's 32-byte archive key, for one).
+        # Folding that line into the value above it moves the secret into the
+        # item's *label*, and the app then reads back an empty secret.
+        secret = "AB12" * 16
+        text = (
+            "[7]\n"
+            "item-type=0\n"
+            "display-name=keyring:archive-0000@rocks.zapfast.ZapFast\n"
+            f"binary-secret={secret}\n"
+            "mtime=1\n"
+        )
+        out = sanitize_keyring_text(text)
+        self.assertIn(f"binary-secret={secret}\n", out)
+        self.assertNotIn("\\nbinary-secret=", out)
+
     def test_idempotent_when_already_single_line(self) -> None:
         once = sanitize_keyring_text(CORRUPT)
         self.assertEqual(once, sanitize_keyring_text(once))
