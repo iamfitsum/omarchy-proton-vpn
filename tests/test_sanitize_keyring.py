@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sanitize_keyring import (  # noqa: E402
+    is_key_line,
     persist_session,
     sanitize_keyring_file,
     sanitize_keyring_text,
@@ -85,6 +86,28 @@ class SanitizeKeyringTests(unittest.TestCase):
         out = sanitize_keyring_text(text)
         self.assertIn(f"binary-secret={secret}\n", out)
         self.assertNotIn("\\nbinary-secret=", out)
+
+    def test_keeps_an_unknown_gkeyfile_field_on_its_own_line(self) -> None:
+        text = (
+            "[8]\n"
+            "item-type=0\n"
+            "display-name=other-app\n"
+            "schema=org.example.Item\n"
+            "mtime=1\n"
+        )
+        out = sanitize_keyring_text(text)
+        self.assertEqual(out, text)
+        self.assertNotIn("\\nschema=", out)
+
+    def test_pem_continuation_is_not_a_key_line(self) -> None:
+        self.assertTrue(is_key_line("secret={"))
+        self.assertTrue(is_key_line("binary-secret=ab"))
+        self.assertFalse(
+            is_key_line(
+                "MCowBQYDK2VwAyEASnHFoFbMzZGJ4ZHExZ8F1CkN1ccaE4WbNxMj6jzoU+U=",
+            ),
+        )
+        self.assertFalse(is_key_line("-----END PUBLIC KEY-----\"}"))
 
     def test_idempotent_when_already_single_line(self) -> None:
         once = sanitize_keyring_text(CORRUPT)

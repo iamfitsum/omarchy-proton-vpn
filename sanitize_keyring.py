@@ -14,28 +14,18 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
-KNOWN_KEYS = (
-    "display-name",
-    "item-type",
-    "ctime",
-    "mtime",
-    "lock-on-idle",
-    "lock-after",
-    "secret",
-    "binary-secret",
-    "key",
-    "value",
-    "name",
-    "type",
-)
+# GKeyFile keys are lowercase, digits, hyphens. Proton PEM continuations are
+# mixed-case base64 and BEGIN/END markers, so they do not match.
+_KEY_LINE = re.compile(r"^[a-z][a-z0-9-]*=")
 
 
 def is_key_line(line: str) -> bool:
-    """Return True if line starts a gnome-keyring INI field."""
-    return any(line.startswith(f"{key}=") for key in KNOWN_KEYS)
+    """Return True if line starts a gnome-keyring GKeyFile field."""
+    return _KEY_LINE.match(line) is not None
 
 
 def sanitize_keyring_text(text: str) -> str:
