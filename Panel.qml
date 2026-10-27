@@ -525,6 +525,7 @@ Panel {
         stateLoaded: vpn.stateLoaded,
         nudgeDismissed: vpn.nudgeDismissed,
         autoConnect: vpn.autoConnect,
+        autoHold: vpn._autoHold,
         autoReady: vpn.autoReady,
         linkActive: vpn.linkActive,
         desired: vpn._desired,
@@ -1100,13 +1101,13 @@ Panel {
               }
 
               // Widget-owned, unlike the two above: the CLI has no setting for
-              // this, so it lives in the widget's own state file.
+              // this, so it lives in the widget's flags.json.
               Toggle {
                 width: parent.width
                 label: "Always On"
                 description: "Reconnects on boot and drops, not after you disconnect"
                 checked: vpn.autoConnect
-                enabled: !vpn.busy
+                enabled: !vpn.busy && vpn.stateLoaded
                 hasCursor: root.cursorActive && root.focusSection === "protection" && root.protectionIndex === 2
                 foreground: root.foreground
                 fontFamily: root.fontFamily

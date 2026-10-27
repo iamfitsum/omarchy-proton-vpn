@@ -133,11 +133,17 @@ Item {
     Quickshell.execDetached(["wl-copy", "--", forwardedPort])
   }
 
-  // Persisted across restarts: last few places connected to, and whether the
-  // kill-switch nudge was dismissed. Location labels only, nothing secret.
+  // Persisted across restarts: recents in state.json; Always On / hold / nudge
+  // in flags.json. Location labels only, nothing secret.
   property var recents: []
   property bool nudgeDismissed: false
-  property bool stateLoaded: false
+  property bool flagsReady: false
+  // Dual-load barrier: undefined = pending, null = flags missing.
+  property var _flagsLoad: undefined
+  property var _recentsLoad: undefined
+  // Hold set before flags.json finished loading.
+  property var _pendingHold: undefined
+  readonly property bool stateLoaded: flagsReady
 
   // ── Always On ───────────────────────────────────────────────────────────
   // One invariant, not a set of triggers: if the switch is on and the tunnel
@@ -166,6 +172,8 @@ Item {
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/iamfitsum-proton-vpn"
   readonly property string legacyStateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/vibe-protonvpn"
   readonly property string statePath: stateDir + "/state.json"
+  // Separate from state.json so Recent and hold writes cannot clobber each other.
+  readonly property string flagsPath: stateDir + "/flags.json"
 
   readonly property string scriptPath: Qt.resolvedUrl("servers.py").toString().replace(/^file:\/\//, "")
   readonly property string changePath: Qt.resolvedUrl("change.py").toString().replace(/^file:\/\//, "")
@@ -187,8 +195,11 @@ Item {
   // different live tunnel (or a down→up), not while the old profile is still up.
   property string _changeFromServer: ""
   // Manual disconnect while Always On: stay down until the user connects
-  // again. Drops, boot, and kill-switch cycling still reconnect.
+  // again. In flags.json so every bar Service and a shell reload share it.
   property bool _autoHold: false
+  // One Always On reconnect across N bar Services.
+  property string _instanceId: ""
+  readonly property int autoClaimTtlMs: 45000
   // Set when we asked for the tunnel to go down, so the drop isn't reported
   // as a failure.
   property bool _expectDown: false
@@ -640,8 +651,7 @@ Item {
   function togglePortForwarding() { setConfig("port-forwarding", portForwardingOn ? "off" : "on") }
 
   function dismissNudge() {
-    nudgeDismissed = true
-    saveState()
+    patchFlags({ killSwitchNudgeDismissed: true })
   }
 
   function toggle() {
@@ -690,9 +700,9 @@ Item {
     var viaApi = !plusPlan && named
     p2pRequested = args.indexOf("--p2p") !== -1
     _autoAttempt = auto === true
-    _autoHold = false
-    if (linkActive) root.markChanging()
-    else root.clearChanging()
+    // While down, leave hold until up/fail so a sibling cannot race mid-connect.
+    // Already up (hop): clear hold now.
+    root.armConnectIntent()
     _desired = 1
     _target = target
     pendingLabel = label || "Connecting…"
@@ -718,9 +728,7 @@ Item {
     if (!installed || !signedIn || busy) return
     p2pRequested = false
     _autoAttempt = false
-    _autoHold = false
-    if (linkActive) root.markChanging()
-    else root.clearChanging()
+    root.armConnectIntent()
     _desired = 1
     _target = null
     pendingLabel = label || "Changing server…"
@@ -730,6 +738,16 @@ Item {
     if (!plusPlan) cmd.push("--free")
     connectProcess.command = cmd
     connectProcess.running = true
+  }
+
+  // Clear hold only when already up — clearing while down races sibling Always On.
+  function armConnectIntent() {
+    if (linkActive) {
+      markChanging()
+      setAutoHold(false)
+    } else {
+      clearChanging()
+    }
   }
 
   /**
@@ -817,7 +835,7 @@ Item {
 
   function disconnect() {
     if (!installed || busy) return
-    if (!_ksCycle) _autoHold = true
+    if (!_ksCycle) root.setAutoHold(true)
     root.clearChanging()
     _desired = 0
     _expectDown = true
@@ -1017,35 +1035,229 @@ Item {
     return { key: r.key, title: String(r.title || ""), subtitle: String(r.subtitle || ""), args: args }
   }
 
-  function applyState(text) {
+  // null = missing/corrupt (fail closed).
+  function readFlagsDisk() {
     try {
-      var s = JSON.parse(String(text || "{}"))
-      recents = Array.isArray(s.recents) ? s.recents.slice(0, 3).map(cleanRecent).filter(Boolean) : []
-      nudgeDismissed = s.killSwitchNudgeDismissed === true
-      autoConnect = s.autoConnect === true
+      var d = JSON.parse(String(flagsFile.text() || "{}"))
+      if (!d || typeof d !== "object" || Array.isArray(d)) return null
+      return d
     } catch (e) {
-      recents = []
-      nudgeDismissed = false
-      autoConnect = false
+      return null
     }
-    stateLoaded = true
   }
 
-  function saveState() {
-    stateFile.setText(JSON.stringify({
-      recents: recents,
-      killSwitchNudgeDismissed: nudgeDismissed,
-      autoConnect: autoConnect
-    }))
+  function normalizeFlags(d) {
+    var out = {
+      killSwitchNudgeDismissed: d.killSwitchNudgeDismissed === true,
+      autoConnect: d.autoConnect === true,
+      autoHold: d.autoHold === true
+    }
+    var claimId = String(d.autoClaimId || "")
+    var claimMs = Number(d.autoClaimMs || 0)
+    if (claimId !== "") {
+      out.autoClaimId = claimId
+      out.autoClaimMs = claimMs
+    }
+    return out
+  }
+
+  function applyFlagsObject(s) {
+    nudgeDismissed = s.killSwitchNudgeDismissed === true
+    autoConnect = s.autoConnect === true
+    _autoHold = s.autoHold === true
+  }
+
+  // Read→mutate→write. Skip write when unchanged; abort on corrupt disk.
+  function mutateFlags(mutator) {
+    if (!flagsReady) return null
+    var d = readFlagsDisk()
+    if (d === null) return null
+    var before = JSON.stringify(normalizeFlags(d))
+    mutator(d)
+    var out = normalizeFlags(d)
+    if (JSON.stringify(out) === before) return out
+    flagsFile.setText(JSON.stringify(out))
+    applyFlagsObject(out)
+    return out
+  }
+
+  function releaseAutoClaimWhenUp() {
+    if (!flagsReady || !linkActive) return
+    if (!connectProcess.running)
+      releaseAutoClaim()
+  }
+
+  // writeForce: migrate / missing / repair. Pending hold is merged before write.
+  function finishFlags(obj, writeForce) {
+    var base = obj && typeof obj === "object" ? obj : {}
+    var needWrite = writeForce === true
+    if (_pendingHold !== undefined) {
+      base.autoHold = _pendingHold === true
+      _pendingHold = undefined
+      needWrite = true
+    }
+    applyFlagsObject(base)
+    flagsReady = true
+    if (needWrite)
+      flagsFile.setText(JSON.stringify(normalizeFlags(base)))
+  }
+
+  // Wait for both FileViews, then apply flags / migrate / default once.
+  function settlePersist() {
+    if (flagsReady) return
+    if (_flagsLoad === undefined || _recentsLoad === undefined) return
+    if (_flagsLoad !== null) {
+      finishFlags(_flagsLoad, false)
+      return
+    }
+    var s = _recentsLoad
+    if (s && typeof s === "object" && ("autoConnect" in s || "autoHold" in s
+        || "killSwitchNudgeDismissed" in s)) {
+      finishFlags(s, true)
+      saveRecents()
+      return
+    }
+    finishFlags({}, true)
+  }
+
+  function applyFlags(text) {
+    var obj = null
+    try {
+      obj = JSON.parse(String(text || "{}"))
+    } catch (e) {
+      obj = null
+    }
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+      if (!flagsReady) {
+        // First-load corrupt ≡ missing so migrate/defaults can repair.
+        _flagsLoad = null
+        settlePersist()
+      }
+      return
+    }
+    if (!flagsReady) {
+      _flagsLoad = obj
+      settlePersist()
+      return
+    }
+    // Trust peer disk intent; do not re-litigate hold against local link.
+    applyFlagsObject(obj)
+  }
+
+  function flagsMissing() {
+    if (flagsReady) return
+    _flagsLoad = null
+    settlePersist()
+  }
+
+  function applyRecents(text) {
+    var s = {}
+    try {
+      s = JSON.parse(String(text || "{}"))
+      recents = Array.isArray(s.recents) ? s.recents.slice(0, 3).map(cleanRecent).filter(Boolean) : []
+    } catch (e) {
+      recents = []
+      s = {}
+    }
+    if (_recentsLoad === undefined) {
+      _recentsLoad = s
+      settlePersist()
+    }
+  }
+
+  function saveRecents() {
+    stateFile.setText(JSON.stringify({ recents: recents }))
+  }
+
+  function patchFlags(patch) {
+    mutateFlags(function(d) {
+      if ("killSwitchNudgeDismissed" in patch)
+        d.killSwitchNudgeDismissed = patch.killSwitchNudgeDismissed === true
+      if ("autoConnect" in patch)
+        d.autoConnect = patch.autoConnect === true
+      if ("autoHold" in patch)
+        d.autoHold = patch.autoHold === true
+    })
+  }
+
+  // One Always On reconnect across monitors; merge onto disk so claims cannot
+  // wipe a sibling's autoHold.
+  function tryClaimAutoConnect() {
+    if (!flagsReady || _instanceId === "") return false
+    var now = Date.now()
+    var peek = readFlagsDisk()
+    if (peek === null) return false
+    if (peek.autoHold === true) return false
+    var peekId = String(peek.autoClaimId || "")
+    var peekMs = Number(peek.autoClaimMs || 0)
+    if (peekId !== "" && peekId !== _instanceId && (now - peekMs) < autoClaimTtlMs)
+      return false
+    var claimed = false
+    mutateFlags(function(d) {
+      if (d.autoHold === true) return
+      var diskId = String(d.autoClaimId || "")
+      var diskMs = Number(d.autoClaimMs || 0)
+      if (diskId !== "" && diskId !== _instanceId && (now - diskMs) < autoClaimTtlMs)
+        return
+      d.autoClaimId = _instanceId
+      d.autoClaimMs = now
+      claimed = true
+    })
+    if (!claimed || _autoHold) {
+      if (claimed) releaseAutoClaim()
+      return false
+    }
+    var d = readFlagsDisk()
+    if (d === null) {
+      releaseAutoClaim()
+      return false
+    }
+    var won = String(d.autoClaimId || "") === _instanceId
+        && Number(d.autoClaimMs || 0) === now
+        && d.autoHold !== true
+    if (!won) {
+      if (String(d.autoClaimId || "") === _instanceId)
+        releaseAutoClaim()
+      return false
+    }
+    return true
+  }
+
+  function releaseAutoClaim() {
+    if (!flagsReady || _instanceId === "") return
+    var cur = readFlagsDisk()
+    if (cur === null || String(cur.autoClaimId || "") !== _instanceId) return
+    mutateFlags(function(d) {
+      delete d.autoClaimId
+      delete d.autoClaimMs
+    })
+  }
+
+  function setAutoHold(hold) {
+    var next = hold === true
+    if (!flagsReady) {
+      _pendingHold = next
+      return
+    }
+    var disk = readFlagsDisk()
+    if (disk === null) {
+      _autoHold = next
+      return
+    }
+    var diskHold = disk.autoHold === true
+    if (_autoHold === next && diskHold === next) return
+    patchFlags({ autoHold: next })
   }
 
   // ── Always On ───────────────────────────────────────────────────────────
 
   function toggleAutoConnect() {
-    autoConnect = !autoConnect
+    if (!flagsReady) return
+    var next = !autoConnect
     _autoNextMs = 0
-    if (autoConnect) _autoHold = false
-    saveState()
+    var patch = { autoConnect: next }
+    if (next) patch.autoHold = false
+    patchFlags(patch)
     autoReconcile()
   }
 
@@ -1063,9 +1275,11 @@ Item {
     if (_autoHold) return
     if (connected || linkActive || busy) return
     if (_autoNextMs > 0 && Date.now() < _autoNextMs) return
+    if (!tryClaimAutoConnect()) return
     var t = recents.length > 0 && Array.isArray(recents[0].args) ? recents[0] : null
     if (t && !_autoPinFailed) connectTo(t.args, "Reconnecting to " + t.title + "…", t, true)
     else connectTo([], "Reconnecting to fastest…", null, true)
+    if (!connectProcess.running) releaseAutoClaim()
   }
 
   function recordRecent(target) {
@@ -1075,10 +1289,11 @@ Item {
       if (recents[i] && recents[i].key !== target.key) next.push(recents[i])
     }
     recents = next
-    saveState()
+    saveRecents()
   }
 
   Component.onCompleted: {
+    _instanceId = "s" + Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36)
     // Owner-only, and fixed up on existing installs too: the file holds where
     // you've been connecting, which is nobody else's business on a shared box.
     Quickshell.execDetached(["install", "-d", "-m", "700", stateDir])
@@ -1162,8 +1377,20 @@ Item {
     id: stateFile
     path: root.statePath
     printErrors: false
-    onLoaded: root.applyState(text())
-    onLoadFailed: root.applyState("{}")
+    atomicWrites: true
+    onLoaded: root.applyRecents(text())
+    onLoadFailed: root.applyRecents("{}")
+  }
+
+  FileView {
+    id: flagsFile
+    path: root.flagsPath
+    printErrors: false
+    watchChanges: true
+    atomicWrites: true
+    onLoaded: root.applyFlags(text())
+    onFileChanged: reload()
+    onLoadFailed: root.flagsMissing()
   }
 
   // Proton's file, not ours. Watched rather than polled, because the CLI
@@ -1340,6 +1567,7 @@ Item {
       root.linkServer = link.server
       root.linkDevice = link.device
       if (link.active && !was) root.trafficReset()
+      root.releaseAutoClaimWhenUp()
       if (!link.active && was) root.trafficReset()
       // A tunnel we didn't ask to close is the one thing a person must hear
       // about: the icon dimming is not a signal most people read.
@@ -1593,12 +1821,31 @@ Item {
         root._desired = -1
         root.clearChanging()
         root.pendingLabel = ""
+        // User already chose to come back; don't leave Always On blocked
+        // forever because link-up never arrived to clear the hold.
+        if (!wasAuto) root.setAutoHold(false)
         var text = err || out || "Connect failed"
         root.lastError = Model.isPlanError(text) ? "Requires a Proton VPN Plus plan" : Model.elide(text)
         root.actionStatus = root.lastError
         actionStatusTimer.restart()
       } else {
         root.lastError = ""
+        // User connect clears hold. Auto: if a sibling held mid-flight, stay off.
+        if (!wasAuto) {
+          root.setAutoHold(false)
+        } else {
+          var held = root.readFlagsDisk()
+          if (held && held.autoHold === true) {
+            root.releaseAutoClaim()
+            // onExited can still see running=true; defer past the busy gate.
+            Qt.callLater(function() {
+              root.disconnect()
+              root.watchLink()
+              delayedRefresh.restart()
+            })
+            return
+          }
+        }
         // The confirmation line, which is not always the first one: an expired
         // server list puts "Server list is outdated, updating..." ahead of it,
         // and that is not what the panel or the notification should report.
@@ -1627,6 +1874,7 @@ Item {
         root.notify("VPN Connected \udb80\udf3e", [where, proto].filter(function(v) { return v !== "" }).join(" · "), "normal")
         root.loadCities(true)
       }
+      if (wasAuto && exitCode !== 0) root.releaseAutoClaim()
       // Look at the link now rather than waiting up to watchIntervalSec, so
       // the override is released against fresh data as soon as possible.
       root.watchLink()
