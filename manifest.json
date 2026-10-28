@@ -7,9 +7,12 @@
   "license": "MIT",
   "description": "Proton VPN for the Omarchy bar: map, country/city picker, Kill Switch, NetShield, Always On, and split tunneling.",
   "kinds": [
+    "service",
     "bar-widget"
   ],
+  "keepLoaded": true,
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "Panel.qml"
   },
   "barWidget": {

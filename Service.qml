@@ -4,7 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import "Model.js" as Model
 
-// Proton VPN state for the bar widget.
+// Proton VPN state for the shell. One instance, not one per bar.
 //
 // Two polls with different costs drive this:
 //
@@ -181,6 +181,14 @@ Item {
   readonly property string sanitizePath: Qt.resolvedUrl("sanitize_keyring.py").toString().replace(/^file:\/\//, "")
   property real _lastPersistMs: 0
   property var _pendingSplitApps: []
+  // Latest selection waiting on expandSplitProcess. null = none queued.
+  property var _splitQueuedApps: null
+  // Non-zero while an expand is running or its onExited has not run yet.
+  property int _splitExpandActive: 0
+  property int _splitExpandSeq: 0
+  property int _splitExpandRunSeq: 0
+  property int _splitIgnoreExits: 0
+  property string _pendingSplitMode: ""
 
   property string actionStatus: ""
   property string lastError: ""
@@ -195,11 +203,10 @@ Item {
   // different live tunnel (or a down→up), not while the old profile is still up.
   property string _changeFromServer: ""
   // Manual disconnect while Always On: stay down until the user connects
-  // again. In flags.json so every bar Service and a shell reload share it.
+  // again. In flags.json so a shell reload still honors it.
   property bool _autoHold: false
-  // One Always On reconnect across N bar Services.
-  property string _instanceId: ""
-  readonly property int autoClaimTtlMs: 45000
+  // How many bar popouts currently have the panel open.
+  property int _panelOpenCount: 0
   // Set when we asked for the tunnel to go down, so the drop isn't reported
   // as a failure.
   property bool _expectDown: false
@@ -577,9 +584,21 @@ Item {
       clean.push(p)
     }
     _pendingSplitApps = clean
+    _pendingSplitMode = splitMode
+    _splitExpandSeq += 1
+    if (expandSplitProcess.running || _splitExpandActive !== 0) {
+      _splitQueuedApps = clean
+      return
+    }
+    startSplitExpand(clean)
+  }
+
+  function startSplitExpand(clean) {
+    _splitExpandRunSeq = _splitExpandSeq
+    _splitExpandActive = _splitExpandRunSeq
+    splitExpandWatch.restart()
     var cmd = ["python3", appsScriptPath, "--expand"]
     for (var i = 0; i < clean.length; i++) cmd.push(clean[i])
-    if (expandSplitProcess.running) expandSplitProcess.running = false
     expandSplitProcess.command = cmd
     expandSplitProcess.running = true
   }
@@ -693,14 +712,27 @@ Item {
     _expectDown = false
   }
 
+  function plusOnlyConnect(args) {
+    for (var i = 0; i < (args || []).length; i++) {
+      var a = args[i]
+      if (a === "--country" || a === "--p2p" || a === "--securecore" || a === "--tor")
+        return true
+    }
+    return false
+  }
+
   function connectTo(args, label, target, auto) {
     if (!installed || !signedIn || busy) return
     args = args || []
+    if (!plusPlan && plusOnlyConnect(args)) {
+      lastError = "Requires a Proton VPN Plus plan"
+      return
+    }
     var named = args.length === 1 && connectArg.test(args[0]) && args[0].charAt(0) !== "-"
     var viaApi = !plusPlan && named
     p2pRequested = args.indexOf("--p2p") !== -1
     _autoAttempt = auto === true
-    // While down, leave hold until up/fail so a sibling cannot race mid-connect.
+    // While down, leave hold until up/fail so a reload cannot race mid-connect.
     // Already up (hop): clear hold now.
     root.armConnectIntent()
     _desired = 1
@@ -740,7 +772,8 @@ Item {
     connectProcess.running = true
   }
 
-  // Clear hold only when already up — clearing while down races sibling Always On.
+  // Clear hold only when already up. Clearing while down races a reload
+  // that still has Always On armed.
   function armConnectIntent() {
     if (linkActive) {
       markChanging()
@@ -759,6 +792,10 @@ Item {
   }
 
   function connectCountry(code, name) {
+    if (!plusPlan) {
+      lastError = "Requires a Proton VPN Plus plan"
+      return
+    }
     var c = String(code || "").trim().toUpperCase()
     if (!/^[A-Z]{2}$/.test(c)) return
     var title = name || c
@@ -1047,18 +1084,11 @@ Item {
   }
 
   function normalizeFlags(d) {
-    var out = {
+    return {
       killSwitchNudgeDismissed: d.killSwitchNudgeDismissed === true,
       autoConnect: d.autoConnect === true,
       autoHold: d.autoHold === true
     }
-    var claimId = String(d.autoClaimId || "")
-    var claimMs = Number(d.autoClaimMs || 0)
-    if (claimId !== "") {
-      out.autoClaimId = claimId
-      out.autoClaimMs = claimMs
-    }
-    return out
   }
 
   function applyFlagsObject(s) {
@@ -1079,12 +1109,6 @@ Item {
     flagsFile.setText(JSON.stringify(out))
     applyFlagsObject(out)
     return out
-  }
-
-  function releaseAutoClaimWhenUp() {
-    if (!flagsReady || !linkActive) return
-    if (!connectProcess.running)
-      releaseAutoClaim()
   }
 
   // writeForce: migrate / missing / repair. Pending hold is merged before write.
@@ -1140,7 +1164,7 @@ Item {
       settlePersist()
       return
     }
-    // Trust peer disk intent; do not re-litigate hold against local link.
+    // Disk changed under us (our write or an edit). Do not re-litigate hold.
     applyFlagsObject(obj)
   }
 
@@ -1180,57 +1204,14 @@ Item {
     })
   }
 
-  // One Always On reconnect across monitors; merge onto disk so claims cannot
-  // wipe a sibling's autoHold.
-  function tryClaimAutoConnect() {
-    if (!flagsReady || _instanceId === "") return false
-    var now = Date.now()
-    var peek = readFlagsDisk()
-    if (peek === null) return false
-    if (peek.autoHold === true) return false
-    var peekId = String(peek.autoClaimId || "")
-    var peekMs = Number(peek.autoClaimMs || 0)
-    if (peekId !== "" && peekId !== _instanceId && (now - peekMs) < autoClaimTtlMs)
-      return false
-    var claimed = false
-    mutateFlags(function(d) {
-      if (d.autoHold === true) return
-      var diskId = String(d.autoClaimId || "")
-      var diskMs = Number(d.autoClaimMs || 0)
-      if (diskId !== "" && diskId !== _instanceId && (now - diskMs) < autoClaimTtlMs)
-        return
-      d.autoClaimId = _instanceId
-      d.autoClaimMs = now
-      claimed = true
-    })
-    if (!claimed || _autoHold) {
-      if (claimed) releaseAutoClaim()
-      return false
-    }
-    var d = readFlagsDisk()
-    if (d === null) {
-      releaseAutoClaim()
-      return false
-    }
-    var won = String(d.autoClaimId || "") === _instanceId
-        && Number(d.autoClaimMs || 0) === now
-        && d.autoHold !== true
-    if (!won) {
-      if (String(d.autoClaimId || "") === _instanceId)
-        releaseAutoClaim()
-      return false
-    }
-    return true
-  }
-
-  function releaseAutoClaim() {
-    if (!flagsReady || _instanceId === "") return
-    var cur = readFlagsDisk()
-    if (cur === null || String(cur.autoClaimId || "") !== _instanceId) return
-    mutateFlags(function(d) {
-      delete d.autoClaimId
-      delete d.autoClaimMs
-    })
+  /**
+   * Count open bar popouts so status/config polls run while any panel is open.
+   * @param {boolean} open true when a panel opens, false when it closes
+   */
+  function setPanelOpen(open) {
+    _panelOpenCount += open ? 1 : -1
+    if (_panelOpenCount < 0) _panelOpenCount = 0
+    panelOpen = _panelOpenCount > 0
   }
 
   function setAutoHold(hold) {
@@ -1241,7 +1222,13 @@ Item {
     }
     var disk = readFlagsDisk()
     if (disk === null) {
+      // Unreadable after load: repair from memory so hold survives a reload.
       _autoHold = next
+      flagsFile.setText(JSON.stringify(normalizeFlags({
+        killSwitchNudgeDismissed: nudgeDismissed,
+        autoConnect: autoConnect,
+        autoHold: next
+      })))
       return
     }
     var diskHold = disk.autoHold === true
@@ -1275,11 +1262,15 @@ Item {
     if (_autoHold) return
     if (connected || linkActive || busy) return
     if (_autoNextMs > 0 && Date.now() < _autoNextMs) return
-    if (!tryClaimAutoConnect()) return
+    startAutoReconnect()
+  }
+
+  function startAutoReconnect() {
+    if (!autoReady || _autoHold || connected || linkActive || busy) return
     var t = recents.length > 0 && Array.isArray(recents[0].args) ? recents[0] : null
-    if (t && !_autoPinFailed) connectTo(t.args, "Reconnecting to " + t.title + "…", t, true)
+    if (t && (plusOnlyConnect(t.args) || _autoPinFailed)) t = null
+    if (t) connectTo(t.args, "Reconnecting to " + t.title + "…", t, true)
     else connectTo([], "Reconnecting to fastest…", null, true)
-    if (!connectProcess.running) releaseAutoClaim()
   }
 
   function recordRecent(target) {
@@ -1293,7 +1284,6 @@ Item {
   }
 
   Component.onCompleted: {
-    _instanceId = "s" + Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36)
     // Owner-only, and fixed up on existing installs too: the file holds where
     // you've been connecting, which is nobody else's business on a shared box.
     Quickshell.execDetached(["install", "-d", "-m", "700", stateDir])
@@ -1388,6 +1378,9 @@ Item {
     printErrors: false
     watchChanges: true
     atomicWrites: true
+    // Tiny JSON. Async setText leaves text() on the previous snapshot.
+    blockWrites: true
+    blockAllReads: true
     onLoaded: root.applyFlags(text())
     onFileChanged: reload()
     onLoadFailed: root.flagsMissing()
@@ -1427,6 +1420,25 @@ Item {
     repeat: true
     running: root.installed && (root.signedIn || root.accountTimedOut)
     onTriggered: root.persistSession(false)
+  }
+
+  Timer {
+    id: splitExpandWatch
+    interval: 10000
+    repeat: false
+    onTriggered: {
+      root._splitIgnoreExits += 1
+      root._splitExpandActive = 0
+      if (expandSplitProcess.running) {
+        expandSplitProcess.running = false
+        return
+      }
+      if (root._splitQueuedApps !== null) {
+        var next = root._splitQueuedApps
+        root._splitQueuedApps = null
+        root.startSplitExpand(next)
+      }
+    }
   }
 
   Timer {
@@ -1567,7 +1579,6 @@ Item {
       root.linkServer = link.server
       root.linkDevice = link.device
       if (link.active && !was) root.trafficReset()
-      root.releaseAutoClaimWhenUp()
       if (!link.active && was) root.trafficReset()
       // A tunnel we didn't ask to close is the one thing a person must hear
       // about: the icon dimming is not a signal most people read.
@@ -1676,12 +1687,20 @@ Item {
     stdout: StdioCollector { id: configStdout; waitForEnd: true }
     onExited: function(exitCode) {
       root._probeRunning = false
-      root.configPending = ""
-      root.configPendingValue = ""
       Qt.callLater(root.drainProbes)
-      if (exitCode !== 0) return
+      if (exitCode !== 0) {
+        if (!root._ksCycle && !setConfigProcess.running) {
+          root.configPending = ""
+          root.configPendingValue = ""
+        }
+        return
+      }
       root.config = Model.parseConfig(String(configStdout.text || ""))
       root.configLoaded = true
+      if (!root._ksCycle && !setConfigProcess.running) {
+        root.configPending = ""
+        root.configPendingValue = ""
+      }
     }
   }
 
@@ -1771,6 +1790,25 @@ Item {
     command: []
     stdout: StdioCollector { id: expandSplitStdout; waitForEnd: true }
     onExited: function(exitCode) {
+      splitExpandWatch.stop()
+      root._splitExpandActive = 0
+      if (root._splitIgnoreExits > 0) {
+        root._splitIgnoreExits -= 1
+        if (root._splitQueuedApps !== null && !expandSplitProcess.running) {
+          var next = root._splitQueuedApps
+          root._splitQueuedApps = null
+          root.startSplitExpand(next)
+        }
+        return
+      }
+      var run = root._splitExpandRunSeq
+      if (root._splitQueuedApps !== null) {
+        var next = root._splitQueuedApps
+        root._splitQueuedApps = null
+        root.startSplitExpand(next)
+        return
+      }
+      if (run !== root._splitExpandSeq) return
       var expanded = root._pendingSplitApps
       if (exitCode === 0) {
         try {
@@ -1780,8 +1818,11 @@ Item {
           expanded = root._pendingSplitApps
         }
       }
-      var mode = root.splitMode
-      root.writeSplit(function(st) { st["config_by_mode"][mode]["app_paths"] = expanded })
+      var mode = root._pendingSplitMode || root.splitMode
+      if (!root.writeSplit(function(st) { st["config_by_mode"][mode]["app_paths"] = expanded })) {
+        if (root.splitError === "")
+          root.splitError = "Could not save split tunneling apps"
+      }
     }
   }
 
@@ -1830,21 +1871,17 @@ Item {
         actionStatusTimer.restart()
       } else {
         root.lastError = ""
-        // User connect clears hold. Auto: if a sibling held mid-flight, stay off.
+        // User connect clears hold. Auto: if the user held mid-flight, stay off.
         if (!wasAuto) {
           root.setAutoHold(false)
-        } else {
-          var held = root.readFlagsDisk()
-          if (held && held.autoHold === true) {
-            root.releaseAutoClaim()
-            // onExited can still see running=true; defer past the busy gate.
-            Qt.callLater(function() {
-              root.disconnect()
-              root.watchLink()
-              delayedRefresh.restart()
-            })
-            return
-          }
+        } else if (root._autoHold) {
+          // onExited can still see running=true; defer past the busy gate.
+          Qt.callLater(function() {
+            root.disconnect()
+            root.watchLink()
+            delayedRefresh.restart()
+          })
+          return
         }
         // The confirmation line, which is not always the first one: an expired
         // server list puts "Server list is outdated, updating..." ahead of it,
@@ -1874,7 +1911,6 @@ Item {
         root.notify("VPN Connected \udb80\udf3e", [where, proto].filter(function(v) { return v !== "" }).join(" · "), "normal")
         root.loadCities(true)
       }
-      if (wasAuto && exitCode !== 0) root.releaseAutoClaim()
       // Look at the link now rather than waiting up to watchIntervalSec, so
       // the override is released against fresh data as soon as possible.
       root.watchLink()

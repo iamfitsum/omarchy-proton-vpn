@@ -47,11 +47,10 @@ Panel {
   // so its cursor length and the position of the sign-out row are computed
   // rather than counted by hand. The caption under the app list carries no
   // cursor of its own.
-  readonly property bool splitDetailVisible: vpn.splitActive
-  // The service and the dialog are private children of this panel; these are
-  // what a harness needs to check the Kill Switch actually moved, and that it
-  // asked first.
-  readonly property string vpnKs: vpn.config["kill-switch"] || ""
+  readonly property bool splitDetailVisible: !!(vpn && vpn.splitActive)
+  // The dialog is a private child of this panel; these are what a harness
+  // needs to check the Kill Switch actually moved, and that it asked first.
+  readonly property string vpnKs: vpn ? (vpn.config["kill-switch"] || "") : ""
   readonly property alias killSwitchDialog: killSwitchConfirm
   readonly property int protectionCount: splitDetailVisible ? 8 : 6
   readonly property int signOutIndex: protectionCount - 1
@@ -59,6 +58,7 @@ Panel {
   // App paths Proton's file already holds that the scan no longer finds, kept
   // as options so an app removed from the system can still be unticked.
   readonly property var splitStaleApps: {
+    if (!vpn) return []
     var chosen = Model.collapseSplitPaths(vpn.splitApps)
     var out = []
     for (var i = 0; i < chosen.length; i++) {
@@ -85,9 +85,9 @@ Panel {
   property bool signOutArmed: false
 
   // Drilled into one country's server list rather than the country list.
-  readonly property bool drilled: vpn.serversCountry !== ""
+  readonly property bool drilled: !!(vpn && vpn.serversCountry !== "")
   // Row 0 inside a drill is "Fastest in <country>"; real servers follow it.
-  readonly property int serverRowCount: drilled ? vpn.servers.length + 1 : 0
+  readonly property int serverRowCount: drilled && vpn ? vpn.servers.length + 1 : 0
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -95,8 +95,8 @@ Panel {
   readonly property color dim: Model.mixInk(foreground, panelBackground, 0.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property color iconColor: vpn.connected ? foreground : dim
-  readonly property color barIconColor: vpn.connected
+  readonly property color iconColor: vpn && vpn.connected ? foreground : dim
+  readonly property color barIconColor: vpn && vpn.connected
                                         ? barForeground
                                         : Model.dimInk(barForeground)
 
@@ -108,15 +108,16 @@ Panel {
     { key: "tor", label: "Tor", hint: "Tor over VPN", plus: true }
   ]
 
-  readonly property var filteredCountries: Model.filterCountries(vpn.countries, filterQuery)
+  readonly property var filteredCountries: Model.filterCountries(vpn ? vpn.countries : [], filterQuery)
 
   // Offered once, until turned on or dismissed. The CLI ships with the kill
   // switch off, which means a dropped tunnel silently exposes the user.
-  readonly property bool nudgeVisible: vpn.signedIn && vpn.configLoaded && vpn.stateLoaded
-                                       && !vpn.killSwitchOn && !vpn.nudgeDismissed
-                                       && !vpn.splitActive
+  readonly property bool nudgeVisible: !!(vpn && vpn.signedIn && vpn.configLoaded
+                                       && vpn.stateLoaded && !vpn.killSwitchOn
+                                       && !vpn.nudgeDismissed && !vpn.splitActive)
 
   readonly property string heroMeta: {
+    if (!vpn) return "Starting…"
     if (!vpn.installed) return vpn.installing ? "Installing…" : "Not installed"
     if (vpn.pendingLabel !== "") return vpn.pendingLabel
     if (vpn.connected) {
@@ -129,9 +130,10 @@ Panel {
     return vpn.displayStatus
   }
 
-  readonly property string toggleHint: vpn.connected ? "Disconnect" : "Connect to fastest server"
+  readonly property string toggleHint: vpn && vpn.connected ? "Disconnect" : "Connect to fastest server"
 
   function runQuick(key) {
+    if (!vpn) return
     if (key === "fastest") vpn.connectFastest()
     else if (key === "random") vpn.connectRandom()
     else if (key === "p2p") vpn.connectP2P()
@@ -140,6 +142,7 @@ Panel {
   }
 
   function sectionList() {
+    if (!vpn) return []
     if (!vpn.installed) return [{ name: "install", count: 1 }]
     if (!vpn.signedIn) return [{ name: "signin", count: 1 }]
     var list = [{ name: "header", count: 1 }]
@@ -214,7 +217,7 @@ Panel {
   }
 
   function highlightRow() {
-    if (!highlight || !drilled || vpn.serversCountry !== highlight.code || !serverColumn) return null
+    if (!vpn || !highlight || !drilled || vpn.serversCountry !== highlight.code || !serverColumn) return null
     for (var i = 0; i < vpn.servers.length; i++) {
       if (vpn.servers[i].city === highlight.city) return serverColumn.children[i + 1] || null
     }
@@ -234,7 +237,7 @@ Panel {
   function clearHighlight() { highlight = null }
 
   function drillInto(country) {
-    if (!country) return
+    if (!vpn || !country) return
     // The map can be clicked from either tab; the city list lives on
     // Connections, so go there first or the drill lands on nothing.
     if (tab !== "connections") setTab("connections")
@@ -246,6 +249,7 @@ Panel {
   }
 
   function drillOut() {
+    if (!vpn) return
     clearHighlight()
     vpn.clearServers()
     focusSection = "countries"
@@ -288,6 +292,7 @@ Panel {
   }
 
   function activateCursor() {
+    if (!vpn) return
     clearHighlight()
     ensureCursor()
     if (focusSection === "install") vpn.installCli()
@@ -316,6 +321,7 @@ Panel {
   }
 
   function activateServerRow(index) {
+    if (!vpn) return
     if (index <= 0) {
       vpn.connectCountry(vpn.serversCountry, vpn.serversCountryName)
     } else {
@@ -329,6 +335,7 @@ Panel {
   // Empty field: put the cursor in it rather than opening a terminal that
   // would only ask the same question.
   function submitSignIn() {
+    if (!vpn) return
     var u = String(usernameField.text || "").trim()
     if (u === "") { usernameField.forceActiveFocus(); return }
     if (vpn.signIn(u)) keyCatcher.forceActiveFocus()
@@ -351,6 +358,7 @@ Panel {
   // Turning port forwarding on opens an inbound door; that deserves a
   // sentence and a click. Turning it off just closes it.
   function requestPortForwarding() {
+    if (!vpn) return
     if (vpn.portForwardingOn) { vpn.togglePortForwarding(); return }
     portForwardConfirm.selectedIndex = 0
     portForwardConfirm.opened = true
@@ -363,6 +371,7 @@ Panel {
   // Disconnected there is nothing to interrupt, so the change just happens.
   // Connected, it costs a reconnect, and that is what the dialog is for.
   function requestKillSwitch() {
+    if (!vpn) return
     if (vpn.splitActive) return
     if (!vpn.connected) { vpn.toggleKillSwitch(); return }
     killSwitchConfirm.selectedIndex = 0
@@ -370,6 +379,7 @@ Panel {
   }
 
   function requestSignOut() {
+    if (!vpn) return
     if (!signOutArmed) { signOutArmed = true; signOutArm.restart(); return }
     signOutArmed = false
     vpn.signOut()
@@ -433,14 +443,56 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  // Host service when Omarchy exposes one. A local Service only on shells
+  // that cannot host: never as a stand-in while serviceFor is still empty.
+  readonly property bool canHostVpn: !!(bar && bar.shell
+                                        && typeof bar.shell.serviceFor === "function")
+  property int _vpnTick: 0
+  readonly property var hostVpn: {
+    var _ = _vpnTick
+    return canHostVpn ? bar.shell.serviceFor(moduleName) : null
+  }
+  readonly property var vpn: canHostVpn ? hostVpn : localVpn.item
+  property bool _panelOpenSent: false
+  property var _openVpn: null
+
+  function releaseVpnPanelOpen() {
+    if (!_panelOpenSent || !_openVpn) {
+      _panelOpenSent = false
+      _openVpn = null
+      return
+    }
+    _openVpn.setPanelOpen(false)
+    _panelOpenSent = false
+    _openVpn = null
+  }
+
+  function syncVpnPanelOpen() {
+    if (_openVpn && _openVpn !== vpn)
+      releaseVpnPanelOpen()
+    if (!vpn) return
+    if (opened === _panelOpenSent && _openVpn === vpn) return
+    if (opened && !_panelOpenSent) {
+      vpn.setPanelOpen(true)
+      _panelOpenSent = true
+      _openVpn = vpn
+    } else if (!opened && _panelOpenSent) {
+      vpn.setPanelOpen(false)
+      _panelOpenSent = false
+      _openVpn = null
+    }
+  }
+
+  onVpnChanged: syncVpnPanelOpen()
+
   onOpenedChanged: {
-    vpn.panelOpen = opened
+    syncVpnPanelOpen()
     if (opened) {
       highlight = null
       anchorPending = false
       cursorActive = false
       filterQuery = ""
-      vpn.clearServers()
+      if (vpn) vpn.clearServers()
       serverIndex = 0
       if (panelFlick) panelFlick.contentY = 0
       ensureCursor()
@@ -448,13 +500,35 @@ Panel {
     }
   }
 
-  Service {
-    id: vpn
-    settings: root.settings
+  Component.onDestruction: releaseVpnPanelOpen()
+
+  Timer {
+    interval: 50
+    running: canHostVpn && hostVpn === null && _vpnTick < 40
+    repeat: true
+    onTriggered: {
+      _vpnTick++
+      if (_vpnTick >= 40 && hostVpn === null)
+        console.warn("Proton VPN host service did not appear")
+    }
+  }
+
+  Loader {
+    id: localVpn
+    active: bar !== null && !canHostVpn
+    sourceComponent: Service {}
+  }
+
+  Binding {
+    target: root.vpn
+    property: "settings"
+    value: root.settings
+    when: root.vpn !== null
   }
 
   Connections {
     target: vpn
+    enabled: vpn !== null
     function onSignedInChanged() { root.ensureCursor() }
     function onInstalledChanged() { root.ensureCursor() }
     function onCountriesChanged() { root.ensureCursor() }
@@ -464,24 +538,29 @@ Panel {
 
   IpcHandler {
     target: root.ipcTarget
-    function open(): void { root.open() }
+    function open(): void { if (vpn) root.open() }
     function close(): void { root.close() }
-    function show(): void { root.open() }
+    function show(): void { if (vpn) root.open() }
     function hide(): void { root.close() }
-    function toggle(): void { root.toggle() }
-    function connect(): string { vpn.connectFastest(); return "ok" }
-    function disconnect(): string { vpn.disconnect(); return "ok" }
-    function refresh(): string { vpn.refresh(); return "ok" }
+    function toggle(): void { if (vpn) root.toggle() }
+    function connect(): string { if (!vpn) return "starting"; vpn.connectFastest(); return "ok" }
+    function disconnect(): string { if (!vpn) return "starting"; vpn.disconnect(); return "ok" }
+    function refresh(): string { if (!vpn) return "starting"; vpn.refresh(); return "ok" }
     // Load one country's city list without opening the panel, opening it
     // steals keyboard focus, and a stray Space/Enter would connect somewhere.
     function servers(code: string): string {
+      if (!vpn) return "starting"
       vpn.loadServers(code, code)
       return "ok"
     }
-    function status(): string { return vpn.displayStatus + (vpn.displayServer !== "" ? ": " + vpn.displayServer : "") }
+    function status(): string {
+      if (!vpn) return "starting"
+      return vpn.displayStatus + (vpn.displayServer !== "" ? ": " + vpn.displayServer : "")
+    }
     // View-only controls: they change what the panel shows, never the tunnel.
     function tab(key: string): string { root.setTab(String(key)); return root.tab }
     function drill(code: string): string {
+      if (!vpn) return "starting"
       var c = String(code || "").toUpperCase()
       if (c === "") { root.drillOut(); return "ok" }
       root.drillInto({ code: c, name: vpn.countryName(c) }); return "ok"
@@ -496,6 +575,7 @@ Panel {
       return String(Math.round(panelFlick.contentY))
     }
     function highlight(code: string, city: string): string {
+      if (!vpn) return "starting"
       root.drillInto({ code: String(code).toUpperCase(), name: vpn.countryName(code) })
       root.highlight = { code: String(code).toUpperCase(), city: String(city) }
       return "ok"
@@ -503,6 +583,7 @@ Panel {
     // Deliberately omits the account email: anything running as this user can
     // call IPC, and the panel is the only place it should be readable.
     function debug(): string {
+      if (!vpn) return JSON.stringify({ starting: true })
       return JSON.stringify({
         installed: vpn.installed,
         gtkAppInstalled: vpn.gtkAppInstalled,
@@ -556,6 +637,7 @@ Panel {
       }
     }
     onPressed: function(buttonCode) {
+      if (!vpn) return
       if (buttonCode === Qt.RightButton) vpn.toggle()
       else if (buttonCode === Qt.MiddleButton) vpn.refresh()
       else root.toggle()
@@ -567,7 +649,7 @@ Panel {
     anchorItem: button
     owner: root
     bar: root.bar
-    open: root.opened
+    open: root.opened && vpn
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(580))
@@ -1100,8 +1182,7 @@ Panel {
                 onClicked: { root.clearHighlight(); vpn.toggleNetShield() }
               }
 
-              // Widget-owned, unlike the two above: the CLI has no setting for
-              // this, so it lives in the widget's flags.json.
+              // Service-owned: the CLI has no setting, so it lives in flags.json.
               Toggle {
                 width: parent.width
                 label: "Always On"
@@ -1357,7 +1438,7 @@ Panel {
               }
               Keys.onReturnPressed: function(event) {
                 var c = root.filteredCountries[0]
-                if (c) {
+                if (c && vpn.plusPlan) {
                   vpn.connectCountry(c.code, c.name)
                   keyCatcher.forceActiveFocus()
                   root.showConnection()

@@ -61,8 +61,8 @@ def sanitize_keyring_text(text: str) -> str:
 
 
 def sanitize_keyring_file(path: Path) -> bool:
-    """Rewrite an INI keyring in place. Returns True if the file changed."""
-    if not path.is_file():
+    """Rewrite an INI keyring atomically. Returns True if the file changed."""
+    if path.is_symlink() or not path.is_file():
         return False
     original = path.read_text(encoding="utf-8")
     if not original.lstrip().startswith("["):
@@ -70,7 +70,15 @@ def sanitize_keyring_file(path: Path) -> bool:
     sanitized = sanitize_keyring_text(original)
     if sanitized == original:
         return False
-    path.write_text(sanitized, encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(sanitized, encoding="utf-8")
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+    except OSError:
+        if tmp.exists() and not tmp.is_symlink():
+            tmp.unlink()
+        raise
     path.chmod(0o600)
     return True
 
@@ -93,7 +101,7 @@ def persist_session() -> bool:
     directory = keyring_dir()
     ini = directory / "Default_keyring.keyring"
     alias = directory / "default"
-    if not ini.is_file():
+    if ini.is_symlink() or not ini.is_file():
         return False
     try:
         head = ini.read_text(encoding="utf-8")
@@ -103,10 +111,19 @@ def persist_session() -> bool:
         return False
     changed = sanitize_keyring_file(ini)
     wanted = "Default_keyring\n"
+    if alias.is_symlink():
+        return changed
     current = alias.read_text(encoding="utf-8") if alias.is_file() else ""
     if current != wanted:
-        alias.write_text(wanted, encoding="utf-8")
-        alias.chmod(0o644)
+        tmp = alias.with_name(alias.name + ".tmp")
+        try:
+            tmp.write_text(wanted, encoding="utf-8")
+            tmp.chmod(0o644)
+            os.replace(tmp, alias)
+        except OSError:
+            if tmp.exists() and not tmp.is_symlink():
+                tmp.unlink()
+            raise
         return True
     return changed
 

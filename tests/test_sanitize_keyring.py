@@ -153,6 +153,7 @@ class SanitizeKeyringTests(unittest.TestCase):
             self.assertNotIn("\nMCow", body)
             self.assertEqual((keyring_dir / "default").read_text(encoding="utf-8"), "Default_keyring\n")
             self.assertEqual(stat.S_IMODE(ini.stat().st_mode), 0o600)
+            self.assertFalse((keyring_dir / "default.tmp").exists())
 
     def test_persist_skips_encrypted_keyring(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -167,6 +168,29 @@ class SanitizeKeyringTests(unittest.TestCase):
                 del os.environ["PROTONVPN_KEYRING_DIR"]
             self.assertEqual(ini.read_text(encoding="latin-1"), "GKR\x00encrypted")
             self.assertFalse((keyring_dir / "default").exists())
+
+    def test_file_rewrite_skips_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real.keyring"
+            real.write_text(CORRUPT, encoding="utf-8")
+            link = Path(tmp) / "Default_keyring.keyring"
+            link.symlink_to(real)
+            self.assertFalse(sanitize_keyring_file(link))
+            self.assertEqual(real.read_text(encoding="utf-8"), CORRUPT)
+
+    def test_persist_skips_symlink_ini(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            keyring_dir = Path(tmp) / "keyrings"
+            keyring_dir.mkdir()
+            real = Path(tmp) / "elsewhere.keyring"
+            real.write_text(CORRUPT, encoding="utf-8")
+            (keyring_dir / "Default_keyring.keyring").symlink_to(real)
+            os.environ["PROTONVPN_KEYRING_DIR"] = str(keyring_dir)
+            try:
+                self.assertFalse(persist_session())
+            finally:
+                del os.environ["PROTONVPN_KEYRING_DIR"]
+            self.assertEqual(real.read_text(encoding="utf-8"), CORRUPT)
 
 
 if __name__ == "__main__":

@@ -89,7 +89,7 @@ minute while signed in, or while the account probe is timed out.
 ```
 manifest.json     plugin contract (id: io.github.iamfitsum.omarchy-proton-vpn)
 Panel.qml         bar-widget entry (same pattern as omarchy.network)
-Service.qml       CLI / nmcli / settings
+Service.qml       host service: one CLI / nmcli / Always On instance per shell
 WorldMap.qml      offline city map
 Traffic.qml       tunnel sparkline
 servers.py        cities from ~/.cache/Proton/VPN/serverlist.json
