@@ -168,7 +168,7 @@ Item {
   property bool _autoAttempt: false
 
   readonly property bool autoReady: installed && signedIn && accountProbed && stateLoaded && autoConnect
-  readonly property bool plusPlan: Model.planIsPaid(plan)
+  readonly property bool plusPlan: Model.planIsPaid(plan, signedIn)
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/iamfitsum-proton-vpn"
   readonly property string legacyStateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/vibe-protonvpn"
   readonly property string statePath: stateDir + "/state.json"
