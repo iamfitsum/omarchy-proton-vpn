@@ -288,10 +288,14 @@ function isPlanError(text) {
 
 /**
  * Return true when protonvpn info's Plan is a paid tier.
- * Empty/unknown is treated as free so PLUS badges still show.
+ * `protonvpn-cli` 1.0.5 prints only "Account: ...", never a Plan line, so a
+ * signed-in session with an unknown plan must NOT be downgraded to the free
+ * tier: the CLI still enforces the real limit when connecting, and treating it
+ * as free appends `--free` and rejects every Plus-only country/feature.
  */
-function planIsPaid(plan) {
+function planIsPaid(plan, signedIn) {
   var p = String(plan || "").toLowerCase()
+  if (p === "") return signedIn === true
   return /plus|visionary|unlimited|business|family|\bduo\b/.test(p)
 }
 
