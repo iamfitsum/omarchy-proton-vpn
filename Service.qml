@@ -41,6 +41,8 @@ Item {
   property bool accountTimedOut: false
   property string account: ""
   property string plan: ""
+  // Authoritative tier from the CLI's API core: -1 unknown, 0 Free, 2 Plus, 3 employee.
+  property int planTier: -1
 
   // nmcli-derived, fast
   property bool linkActive: false
@@ -125,6 +127,12 @@ Item {
     portProcess.running = true
   }
 
+  function refreshPlan() {
+    if (planProcess.running) return
+    planProcess.command = ["python3", planScriptPath]
+    planProcess.running = true
+  }
+
   onConnectedChanged: if (!connected) forwardedPort = ""
 
   // Copy is the only thing the widget ever does with the port.
@@ -168,7 +176,10 @@ Item {
   property bool _autoAttempt: false
 
   readonly property bool autoReady: installed && signedIn && accountProbed && stateLoaded && autoConnect
-  readonly property bool plusPlan: Model.planIsPaid(plan, signedIn)
+  // `planTier` is read from the CLI's API core (0 Free, 2 Plus, 3 employee).
+  // Only when that helper cannot answer do we fall back to parsing
+  // `protonvpn info`, which prints no Plan line at all in CLI 1.0.5.
+  readonly property bool plusPlan: planTier >= 0 ? planTier >= 2 : Model.planIsPaid(plan, signedIn)
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/iamfitsum-proton-vpn"
   readonly property string legacyStateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/vibe-protonvpn"
   readonly property string statePath: stateDir + "/state.json"
@@ -179,6 +190,7 @@ Item {
   readonly property string changePath: Qt.resolvedUrl("change.py").toString().replace(/^file:\/\//, "")
   readonly property string appsScriptPath: Qt.resolvedUrl("apps.py").toString().replace(/^file:\/\//, "")
   readonly property string sanitizePath: Qt.resolvedUrl("sanitize_keyring.py").toString().replace(/^file:\/\//, "")
+  readonly property string planScriptPath: Qt.resolvedUrl("plan.py").toString().replace(/^file:\/\//, "")
   property real _lastPersistMs: 0
   property var _pendingSplitApps: []
   // Latest selection waiting on expandSplitProcess. null = none queued.
@@ -1363,6 +1375,24 @@ Item {
     }
   }
 
+  // `protonvpn info` never prints the plan, so ask the CLI's own API core for
+  // VPNAccount.max_tier (0 Free, 2 Plus, 3 employee) instead of guessing from
+  // the absence of a Plan line.
+  Process {
+    id: planProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: planStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      var tier = -1
+      if (exitCode === 0) {
+        var m = /tier=(-?[0-9]+)/.exec(String(planStdout.text || ""))
+        if (m) tier = parseInt(m[1], 10)
+      }
+      root.planTier = isNaN(tier) ? -1 : tier
+    }
+  }
+
   FileView {
     id: stateFile
     path: root.statePath
@@ -1665,6 +1695,7 @@ Item {
       root.plan = info.plan
       root.lastError = ""
       if (info.signedIn) {
+        root.refreshPlan()
         root.persistSession(!was)
         if (!was) {
           root.loadCountries(true)
