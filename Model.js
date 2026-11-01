@@ -287,16 +287,38 @@ function isPlanError(text) {
 }
 
 /**
- * Return true when protonvpn info's Plan is a paid tier.
- * `protonvpn-cli` 1.0.5 prints only "Account: ...", never a Plan line, so a
- * signed-in session with an unknown plan must NOT be downgraded to the free
- * tier: the CLI still enforces the real limit when connecting, and treating it
- * as free appends `--free` and rejects every Plus-only country/feature.
+ * Return true when a plan label is a paid tier.
+ * Empty/unknown is not paid. CLI 1.0.5 prints no Plan line, so the widget
+ * reads max_tier from plan.py and only uses this as a fallback.
  */
-function planIsPaid(plan, signedIn) {
+function planIsPaid(plan) {
   var p = String(plan || "").toLowerCase()
-  if (p === "") return signedIn === true
   return /plus|visionary|unlimited|business|family|\bduo\b/.test(p)
+}
+
+/**
+ * Return true when a plan label is explicitly Free.
+ */
+function planIsFree(plan) {
+  return /^free$/.test(String(plan || "").toLowerCase())
+}
+
+/**
+ * `{tier, name, title}` from plan.py. Unknown/corrupt -> tier -1.
+ */
+function parsePlan(raw) {
+  try {
+    var obj = JSON.parse(String(raw || "{}"))
+    var tier = parseInt(String(obj && obj.tier), 10)
+    if (!isFinite(tier) || tier < -1 || tier > 3) tier = -1
+    return {
+      tier: tier,
+      name: String((obj && obj.name) || ""),
+      title: String((obj && obj.title) || "")
+    }
+  } catch (e) {
+    return { tier: -1, name: "", title: "" }
+  }
 }
 
 /**

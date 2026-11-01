@@ -127,9 +127,23 @@ Item {
     portProcess.running = true
   }
 
+  function clearPlan() {
+    planTier = -1
+    plan = ""
+    _wantPlan = false
+  }
+
+  /**
+   * Ask the CLI's API core for max_tier. protonvpn info no longer prints Plan.
+   */
   function refreshPlan() {
-    if (planProcess.running) return
-    planProcess.command = ["python3", planScriptPath]
+    if (!installed || !signedIn) {
+      clearPlan()
+      return
+    }
+    if (cliBusy) { _wantPlan = true; return }
+    _probeRunning = true
+    planProcess.command = root.probeCommand(["python3", planScriptPath])
     planProcess.running = true
   }
 
@@ -176,10 +190,11 @@ Item {
   property bool _autoAttempt: false
 
   readonly property bool autoReady: installed && signedIn && accountProbed && stateLoaded && autoConnect
-  // `planTier` is read from the CLI's API core (0 Free, 2 Plus, 3 employee).
-  // Only when that helper cannot answer do we fall back to parsing
-  // `protonvpn info`, which prints no Plan line at all in CLI 1.0.5.
-  readonly property bool plusPlan: planTier >= 0 ? planTier >= 2 : Model.planIsPaid(plan, signedIn)
+  // `planTier` is from the CLI's API core (0 Free, 2 Plus, 3 employee, -1 unknown).
+  // Unknown is neither paid nor free: do not pin `--free` or reject Plus
+  // countries, and do not pretend a signed-in session is Plus.
+  readonly property bool plusPlan: planTier >= 2 || Model.planIsPaid(plan)
+  readonly property bool knownFree: planTier === 0 || Model.planIsFree(plan)
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/iamfitsum-proton-vpn"
   readonly property string legacyStateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/vibe-protonvpn"
   readonly property string statePath: stateDir + "/state.json"
@@ -260,7 +275,9 @@ Item {
   property bool _wantAccount: false
   property bool _wantCountries: false
   property bool _wantConfig: false
-  readonly property bool _probesPending: _wantStatus || _wantAccount || _wantCountries || _wantConfig
+  property bool _wantPlan: false
+  readonly property bool _probesPending: _wantStatus || _wantAccount || _wantCountries
+                                         || _wantConfig || _wantPlan
   readonly property bool refreshing: statusProcess.running
   // Which config key is mid-change, "" when nothing is, and the value it's
   // heading for. A click costs two CLI runs, `config set` then the `config
@@ -736,12 +753,12 @@ Item {
   function connectTo(args, label, target, auto) {
     if (!installed || !signedIn || busy) return
     args = args || []
-    if (!plusPlan && plusOnlyConnect(args)) {
+    if (knownFree && plusOnlyConnect(args)) {
       lastError = "Requires a Proton VPN Plus plan"
       return
     }
     var named = args.length === 1 && connectArg.test(args[0]) && args[0].charAt(0) !== "-"
-    var viaApi = !plusPlan && named
+    var viaApi = knownFree && named
     p2pRequested = args.indexOf("--p2p") !== -1
     _autoAttempt = auto === true
     // While down, leave hold until up/fail so a reload cannot race mid-connect.
@@ -779,7 +796,7 @@ Item {
     actionStatus = pendingLabel
     lastError = ""
     var cmd = ["python3", changePath, "--current", displayServer || ""]
-    if (!plusPlan) cmd.push("--free")
+    if (knownFree) cmd.push("--free")
     connectProcess.command = cmd
     connectProcess.running = true
   }
@@ -804,7 +821,7 @@ Item {
   }
 
   function connectCountry(code, name) {
-    if (!plusPlan) {
+    if (knownFree) {
       lastError = "Requires a Proton VPN Plus plan"
       return
     }
@@ -933,6 +950,7 @@ Item {
     _expectDown = true
     trafficReset()
     pendingLabel = "Signing out…"
+    clearPlan()
     actionProcess.command = ["protonvpn", "signout"]
     actionProcess.running = true
   }
@@ -1280,7 +1298,7 @@ Item {
   function startAutoReconnect() {
     if (!autoReady || _autoHold || connected || linkActive || busy) return
     var t = recents.length > 0 && Array.isArray(recents[0].args) ? recents[0] : null
-    if (t && (plusOnlyConnect(t.args) || _autoPinFailed)) t = null
+    if (t && ((knownFree && plusOnlyConnect(t.args)) || _autoPinFailed)) t = null
     if (t) connectTo(t.args, "Reconnecting to " + t.title + "…", t, true)
     else connectTo([], "Reconnecting to fastest…", null, true)
   }
@@ -1384,12 +1402,21 @@ Item {
     command: []
     stdout: StdioCollector { id: planStdout; waitForEnd: true }
     onExited: function(exitCode) {
-      var tier = -1
-      if (exitCode === 0) {
-        var m = /tier=(-?[0-9]+)/.exec(String(planStdout.text || ""))
-        if (m) tier = parseInt(m[1], 10)
+      root._probeRunning = false
+      Qt.callLater(root.drainProbes)
+      if (!root.signedIn) {
+        root.clearPlan()
+        return
       }
-      root.planTier = isNaN(tier) ? -1 : tier
+      var parsed = exitCode === 0 ? Model.parsePlan(String(planStdout.text || ""))
+                                  : { tier: -1, name: "", title: "" }
+      root.planTier = parsed.tier
+      if (parsed.tier < 0) {
+        root.plan = ""
+        return
+      }
+      var label = parsed.title !== "" ? parsed.title : parsed.name
+      root.plan = label
     }
   }
 
@@ -1503,6 +1530,7 @@ Item {
   function drainProbes() {
     if (cliBusy) return
     if (_wantAccount) { _wantAccount = false; refreshAccount(); return }
+    if (_wantPlan) { _wantPlan = false; refreshPlan(); return }
     if (_wantConfig) { _wantConfig = false; loadConfig(); return }
     if (_wantCountries) { _wantCountries = false; loadCountries(false); return }
     if (_wantStatus) { _wantStatus = false; refreshStatus(); return }
@@ -1692,17 +1720,17 @@ Item {
       root.accountProbed = true
       root.signedIn = info.signedIn
       root.account = info.account
-      root.plan = info.plan
+      if (info.plan !== "") root.plan = info.plan
       root.lastError = ""
       if (info.signedIn) {
-        root.refreshPlan()
+        root._wantPlan = true
         root.persistSession(!was)
         if (!was) {
           root.loadCountries(true)
           root.loadConfig()
         }
-      }
-      if (!info.signedIn) {
+      } else {
+        root.clearPlan()
         root.countries = []
         root.countriesLoaded = false
         root.config = {}

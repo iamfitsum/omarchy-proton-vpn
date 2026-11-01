@@ -93,6 +93,7 @@ Service.qml       host service: one CLI / nmcli / Always On instance per shell
 WorldMap.qml      offline city map
 Traffic.qml       tunnel sparkline
 servers.py        cities from ~/.cache/Proton/VPN/serverlist.json
+plan.py           plan tier from the CLI API core (`protonvpn info` has no Plan line)
 change.py         Change server / Random / named reconnect via the session API
 apps.py           split-tunnel app picker
 port.py           NAT-PMP renew on 10.2.0.1
