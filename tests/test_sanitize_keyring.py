@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
@@ -18,6 +19,22 @@ from sanitize_keyring import (  # noqa: E402
     sanitize_keyring_file,
     sanitize_keyring_text,
 )
+
+
+def gkeyfile_unescape(value: str) -> str:
+    """Decode a GKeyFile value the way gnome-keyring reads it back."""
+    out: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            nxt = value[index + 1]
+            out.append({"n": "\n", "t": "\t", "r": "\r", "s": " ", "\\": "\\"}.get(nxt, nxt))
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
 
 
 CORRUPT = """[keyring]
@@ -41,19 +58,35 @@ value=Proton
 
 
 class SanitizeKeyringTests(unittest.TestCase):
-    def test_folds_pem_newlines_and_keeps_base64_padding(self) -> None:
+    def test_reencodes_json_secret_so_the_value_holds_no_newline(self) -> None:
+        # Folding alone leaves the decoded value holding real newlines, which
+        # the daemon writes back raw on the next save -> a broken file one boot
+        # later. A JSON secret is therefore re-encoded with the newlines
+        # escaped inside the string.
         out = sanitize_keyring_text(CORRUPT)
         self.assertNotIn("\nMCow", out)
-        self.assertIn(
-            'secret={"ClientKey": "-----BEGIN PUBLIC KEY-----\\n'
-            "MCowBQYDK2VwAyEASnHFoFbMzZGJ4ZHExZ8F1CkN1ccaE4WbNxMj6jzoU+U=\\n"
-            '-----END PUBLIC KEY-----"}',
-            out,
-        )
+        secret_line = next(line for line in out.splitlines() if line.startswith("secret="))
+        self.assertIn("\\\\n", secret_line)  # file text carries an escaped backslash
+        value = gkeyfile_unescape(secret_line.partition("=")[2])
+        self.assertNotIn("\n", value)
+        decoded = json.loads(value)
+        self.assertTrue(decoded["ClientKey"].startswith("-----BEGIN PUBLIC KEY-----"))
+        self.assertTrue(decoded["ClientKey"].endswith("-----END PUBLIC KEY-----"))
         self.assertIn("name=service", out)
         self.assertIn("value=Proton", out)
         self.assertNotIn("Proton\\n", out)
         self.assertIn("\n\n[4:attribute0]\n", out)
+
+    def test_folds_a_multiline_value_that_is_not_json(self) -> None:
+        text = "[1]\nitem-type=0\nsecret=first part\nsecond part\nmtime=1\n"
+        out = sanitize_keyring_text(text)
+        self.assertIn("secret=first part\\nsecond part\n", out)
+
+    def test_no_raw_newline_is_left_inside_any_value(self) -> None:
+        out = sanitize_keyring_text(CORRUPT)
+        for line in out.splitlines():
+            if line and not line.startswith("[") and not is_key_line(line):
+                self.fail(f"value continuation line survived: {line!r}")
 
     def test_does_not_fold_blank_line_into_attribute_values(self) -> None:
         text = (

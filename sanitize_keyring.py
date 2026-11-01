@@ -5,6 +5,13 @@ Proton stores JSON+PEM in the unencrypted keyring. Literal newlines in
 those secrets make gnome-keyring reject the whole file, after which Chrome
 creates a new encrypted 'Default' keyring and prompts for a password.
 
+Folding alone is not enough: a value that only *looks* single-line still
+decodes to one that holds real newlines, and the daemon stores the decoded
+value. On the next save it writes those newlines back raw, which leaves an
+unparseable line and the following daemon start loads no collections at all
+(the same prompt, one boot later). So a JSON secret is re-encoded with its
+newlines escaped inside the string, leaving no real newline in the value.
+
 `--persist` sanitizes Omarchy's passwordless INI (if it exists) and pins
 the `default` alias to it. It does not create keyrings, restart the
 daemon, or quarantine Chrome stores.
@@ -13,6 +20,7 @@ daemon, or quarantine Chrome stores.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -22,14 +30,68 @@ from pathlib import Path
 # mixed-case base64 and BEGIN/END markers, so they do not match.
 _KEY_LINE = re.compile(r"^[a-z][a-z0-9-]*=")
 
+_JSON_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
 
 def is_key_line(line: str) -> bool:
     """Return True if line starts a gnome-keyring GKeyFile field."""
     return _KEY_LINE.match(line) is not None
 
 
+def gkeyfile_escape(value: str) -> str:
+    """Encode a value so GKeyFile decodes it back unchanged."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+
+
+def reencode_json_value(value: str) -> str | None:
+    """Return JSON with no raw newline left in it, or None if not JSON.
+
+    Newlines inside a JSON string become the two characters ``\\n`` (which is
+    what the producer meant); whitespace outside a string becomes a space, and
+    JSON ignores it. The result therefore round-trips through GKeyFile with no
+    real newline in the stored value.
+    """
+    if not value.lstrip().startswith(("{", "[")):
+        return None
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    for char in value:
+        if escaped:
+            repaired.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            repaired.append(char)
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            repaired.append(char)
+            continue
+        if char in _JSON_ESCAPES:
+            repaired.append(_JSON_ESCAPES[char] if in_string else " ")
+            continue
+        repaired.append(char)
+    candidate = "".join(repaired)
+    try:
+        json.loads(candidate)
+    except ValueError:
+        return None
+    return candidate
+
+
 def sanitize_keyring_text(text: str) -> str:
-    """Return INI text with multiline values folded using GKeyFile \\n."""
+    """Return INI text with multiline values made GKeyFile-parseable.
+
+    Values that are JSON are re-encoded so the stored value holds no real
+    newline; anything else is folded with GKeyFile ``\\n``.
+    """
     lines = text.splitlines()
     out: list[str] = []
     index = 0
@@ -53,7 +115,12 @@ def sanitize_keyring_text(text: str) -> str:
         if len(parts) == 1:
             out.append(f"{key}={value}")
         else:
-            out.append(f"{key}={'\\n'.join(parts)}")
+            joined = "\n".join(parts)
+            reencoded = reencode_json_value(joined)
+            if reencoded is None:
+                out.append(f"{key}={'\\n'.join(parts)}")
+            else:
+                out.append(f"{key}={gkeyfile_escape(reencoded)}")
     result = "\n".join(out)
     if text.endswith("\n"):
         result += "\n"
