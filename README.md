@@ -79,10 +79,12 @@ background timer. gnome-keyring 50 aborts if that CLI is polled forever.
 
 ## Session
 
-Sign in once from the panel. The plugin folds Proton's gnome-keyring INI
-so the session survives reboot until you sign out. Proton's daemon
-sometimes writes raw newlines back; the plugin folds again about once a
-minute while signed in, or while the account probe is timed out.
+Sign in once from the panel. The plugin sanitizes Proton's gnome-keyring INI
+so the session survives reboot until you sign out: JSON values are re-encoded
+with their newlines escaped inside the string, so the stored value holds no
+real newline. Proton's daemon sometimes writes raw newlines back, and the
+plugin sanitizes again about once a minute while signed in, or while the
+account probe is timed out.
 
 ## Layout
 

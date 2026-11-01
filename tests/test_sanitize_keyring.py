@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
@@ -13,6 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sanitize_keyring import (  # noqa: E402
+    gkeyfile_escape,
+    gkeyfile_unescape,
     is_key_line,
     persist_session,
     sanitize_keyring_file,
@@ -41,19 +44,43 @@ value=Proton
 
 
 class SanitizeKeyringTests(unittest.TestCase):
-    def test_folds_pem_newlines_and_keeps_base64_padding(self) -> None:
+    def test_reencodes_json_instead_of_folding_it(self) -> None:
         out = sanitize_keyring_text(CORRUPT)
-        self.assertNotIn("\nMCow", out)
-        self.assertIn(
-            'secret={"ClientKey": "-----BEGIN PUBLIC KEY-----\\n'
-            "MCowBQYDK2VwAyEASnHFoFbMzZGJ4ZHExZ8F1CkN1ccaE4WbNxMj6jzoU+U=\\n"
-            '-----END PUBLIC KEY-----"}',
-            out,
-        )
+        line = next(l for l in out.split("\n") if l.startswith("secret="))
+        stored = gkeyfile_unescape(line[len("secret="):])
+        # The daemon holds the decoded value: it must be JSON, not a string with
+        # raw newlines in it. proton.keyring_linux deletes an item whose stored
+        # JSON will not parse, which surfaces as "logged out of Proton VPN"
+        # with nothing in vpn-cli.log.
+        payload = json.loads(stored)
+        self.assertEqual(payload["ClientKey"].count("\n"), 2)
+        self.assertNotIn("\\n", payload["ClientKey"])  # not literal backslash-n
+        self.assertIn("\\\\nMCow", out)  # one escaping level in the file text
         self.assertIn("name=service", out)
         self.assertIn("value=Proton", out)
-        self.assertNotIn("Proton\\n", out)
         self.assertIn("\n\n[4:attribute0]\n", out)
+
+    def test_repairs_a_json_value_that_was_folded_not_escaped(self) -> None:
+        # Pre-fix behaviour: PEM newlines folded to a single \n, so the file
+        # parses but the decoded value holds real newlines and is invalid JSON.
+        folded = CORRUPT.replace(
+            "-----BEGIN PUBLIC KEY-----\nMCow\n-----END PUBLIC KEY-----",
+            "-----BEGIN PUBLIC KEY-----\nMCow\n-----END PUBLIC KEY-----",
+        )
+        with self.assertRaises(ValueError):
+            json.loads(folded.split("secret=")[1].split("\nmtime=")[0])
+
+        out = sanitize_keyring_text(folded)
+        line = next(l for l in out.split("\n") if l.startswith("secret="))
+        payload = json.loads(gkeyfile_unescape(line[len("secret="):]))
+        self.assertEqual(payload["ClientKey"].count("\n"), 2)
+
+    def test_leaves_valid_json_and_plain_strings_untouched(self) -> None:
+        value = gkeyfile_escape('{"a": "b"}')
+        text = f"[9]\nitem-type=0\nsecret={value}\nmtime=1\n"
+        self.assertEqual(sanitize_keyring_text(text), text)
+        plain = "[9]\nitem-type=0\ndisplay-name=hello\nmtime=1\n"
+        self.assertEqual(sanitize_keyring_text(plain), plain)
 
     def test_does_not_fold_blank_line_into_attribute_values(self) -> None:
         text = (
